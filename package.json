@@ -1,0 +1,19 @@
+{
+  "name": "fairground-toss",
+  "version": "1.0.0",
+  "description": "Ярмарочный Тир / Fairground Toss — казуальная аркада-тир: тяни рогатку и отпускай мешочек, сбивай пирамиду банок и собирай призы.",
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "playwright": "^1.61.1"
+  }
+}
