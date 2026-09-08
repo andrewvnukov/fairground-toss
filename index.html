@@ -149,11 +149,20 @@ const LB_NAME  = "cascade";
 let ysdk=null, player=null, lb=null, saveT=0, booted=false;
 
 // ---------- i18n ----------
+// платформенный язык читаем один раз, как только SDK готов, НЕЗАВИСИМО от того,
+// есть ли уже сохранённый явный выбор игрока — иначе при сохранённом S.lang
+// свойство ysdk.environment.i18n.lang вообще не будет затронуто ни разу за
+// сессию, и дебаг-панель площадки покажет "I18N is not used".
+let platformLang=null;
+function readPlatformLang(){
+  try{ if(ysdk&&ysdk.environment&&ysdk.environment.i18n&&ysdk.environment.i18n.lang){
+    platformLang = ysdk.environment.i18n.lang==="ru"?"ru":"en"; return; } }catch(e){}
+  platformLang = (navigator.language||"ru").slice(0,2)==="ru"?"ru":"en";
+}
 function lang(){
   try{ if(S && (S.lang==="ru"||S.lang==="en")) return S.lang; }catch(e){}
-  try{ if(ysdk&&ysdk.environment&&ysdk.environment.i18n&&ysdk.environment.i18n.lang)
-    return ysdk.environment.i18n.lang==="ru"?"ru":"en"; }catch(e){}
-  return (navigator.language||"ru").slice(0,2)==="ru"?"ru":"en";
+  if(platformLang===null) readPlatformLang();
+  return platformLang;
 }
 function toggleLang(){
   S.lang = lang()==="ru" ? "en" : "ru";
@@ -227,37 +236,86 @@ const prizeCost  = pz => Math.max(1, Math.round(pz.cost * prizeCostMult()));
 const upCost = () => { const n=nextPrize(); return n? prizeCost(n) : 0; };
 
 // ---------- Сейвы ----------
-function persist(force){
+function persist(force, flush){
   const now=Date.now();
   if(!force && now-saveT<10000) return;
   saveT=now;
   const raw=JSON.stringify(S);
   try{ localStorage.setItem(SAVE_KEY,raw); }catch(e){}
-  if(player){ try{ player.setData({save:raw}); }catch(e){} }
+  if(player){ try{ player.setData({save:raw}, !!flush); }catch(e){} }
 }
+let lastFlushAt=0;
+function flushSave(){
+  const now=Date.now();
+  if(now-lastFlushAt<3000) return;    // не жечь лимит запросов частым переключением вкладок
+  lastFlushAt=now;
+  persist(true, true);
+}
+document.addEventListener("visibilitychange", ()=>{ if(document.hidden) flushSave(); });
+addEventListener("pagehide", flushSave);
 function restore(raw){
   if(!raw) return;
   try{ const d=(typeof raw==="string")?JSON.parse(raw):(raw.save?JSON.parse(raw.save):raw);
        if(d&&typeof d==="object") S=Object.assign(fresh(),d); }catch(e){}
+  // защита от битого/чужого/будущего сейва: неизвестный id приза — это "ничего",
+  // а не что-то ценное, и не должен ронять игру (PZ(id) вернёт undefined и
+  // упадёт при первом же обращении к .ips/.shape)
   if(!Array.isArray(S.prizes)) S.prizes=[];
+  S.prizes = S.prizes.filter(id=>!!PZ(id));
+  S.upAim    = Math.min(Math.max(0, S.upAim|0),    MAX_AIM);
+  S.upLights = Math.min(Math.max(0, S.upLights|0), MAX_LIGHTS);
+  S.upHost   = Math.min(Math.max(0, S.upHost|0),   MAX_HOST);
+  if(typeof S.coins!=="number" || !isFinite(S.coins) || S.coins<0) S.coins=0;
 }
 
 // ---------- Реклама ----------
-let lastAd=0;
+const AD_GAP_S=180, AD_WARMUP_S=60, AD_RETRY_S=45;
+const sessionStart=Date.now();
+let nextAdAt=sessionStart+AD_WARMUP_S*1000, adBusy=false;
+function adAllowed(){
+  if(!ysdk || !ysdk.adv || !ysdk.adv.showFullscreenAdv) return false;
+  if(adBusy) return false;
+  if(document.hidden) return false;
+  if(Date.now()<nextAdAt) return false;
+  if(modalOpen) return false;              // не поверх открытой полки/магазина/улучшений
+  return true;
+}
 function maybeInterstitial(){
-  if(!ysdk) return;
-  if(Date.now()-lastAd < 180000) return;
-  lastAd=Date.now();
-  try{ ysdk.adv.showFullscreenAdv({}); }catch(e){}
+  if(!adAllowed()) return;
+  adBusy=true;
+  const finish = wasShown => {
+    adBusy=false;
+    audioResume();
+    nextAdAt = Date.now() + (wasShown? AD_GAP_S : AD_RETRY_S)*1000;
+  };
+  try{
+    ysdk.adv.showFullscreenAdv({ callbacks:{
+      onOpen:  ()=>audioSuspend(),
+      onClose: was=>finish(!!was),
+      onError: ()=>finish(false),
+    }});
+  }catch(e){ adBusy=false; }
 }
 function showRewarded(onReward){
-  if(!ysdk){ onReward(); return; }
-  try{ ysdk.adv.showRewardedVideo({callbacks:{ onRewarded:onReward, onError:onReward, onClose:()=>{} }}); }
-  catch(e){ onReward(); }
+  if(!ysdk || !ysdk.adv || !ysdk.adv.showRewardedVideo){ onReward(); return; }
+  let paid=false;
+  const pay=()=>{ if(!paid){ paid=true; onReward(); } };
+  try{
+    ysdk.adv.showRewardedVideo({ callbacks:{
+      onOpen:     ()=>audioSuspend(),
+      onRewarded: pay,
+      onClose:    ()=>audioResume(),
+      onError:    ()=>{ audioResume(); pay(); },
+    }});
+  }catch(e){ onReward(); }
 }
 
 // ---------- Лидерборд ----------
-function submitScore(v){ try{ if(lb&&LB_NAME) lb.setLeaderboardScore(LB_NAME, Math.floor(v)); }catch(e){} }
+function submitScore(v){
+  if(!lb || !LB_NAME || v<=0) return;
+  if(player && typeof player.isAuthorized==="function" && !player.isAuthorized()) return;
+  try{ lb.setScore(LB_NAME, Math.floor(v)); }catch(e){}
+}
 
 // ---------- HUD ----------
 const $ = id => document.getElementById(id);
@@ -311,6 +369,10 @@ function claimX2(){
 }
 function checkDaily(){
   const today=new Date().toISOString().slice(0,10);
+  if(S.lastDaily===""){
+    // самый первый запуск: тихо стартуем цикл, без "С возвращением!" новичку
+    S.lastDaily=today; persist(true); return;
+  }
   if(S.lastDaily!==today){
     S.lastDaily=today; const g=dailyAmt();
     S.coins+=g; persist(true);
@@ -978,6 +1040,7 @@ function boot(raw){
       YaGames.init().then(sdk=>{
         ysdk=sdk;
         try{ sdk.features.LoadingAPI && sdk.features.LoadingAPI.ready(); }catch(e){}
+        readPlatformLang();   // читаем платформенный язык безусловно, на каждом запуске с SDK
         const pReady = sdk.getPlayer({scopes:false}).then(p=>{player=p;return p.getData(["save"]);})
           .then(d=>boot(d&&d.save?d.save:localRaw)).catch(()=>boot(localRaw));
         try{ lb = sdk.leaderboards; }catch(e){}

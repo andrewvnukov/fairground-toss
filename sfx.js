@@ -18,6 +18,13 @@ function ensureAudio(){
 }
 addEventListener("pointerdown", ()=>{ const ctx=ensureAudio(); if(ctx&&ctx.state!=="running") ctx.resume().catch(()=>{}); }, {once:true, passive:true});
 
+// ---------- Приглушение звука: вручную (реклама) и по видимости вкладки ----------
+function audioSuspend(){ try{ if(audioCtx && audioCtx.state==="running") audioCtx.suspend(); }catch(e){} }
+function audioResume(){ try{ if(audioCtx && audioCtx.state==="suspended" && document.visibilityState==="visible") audioCtx.resume(); }catch(e){} }
+// звук паузится при потере фокуса вкладки (не путать с ручным глушением на время рекламы —
+// во время показа рекламы страница фокус НЕ теряет, поэтому этот слушатель её не тронет)
+document.addEventListener("visibilitychange", ()=>{ if(document.hidden) audioSuspend(); else audioResume(); });
+
 const rand = (a=1,b=0) => b+(a-b)*Math.random();
 
 // ---------- ZzFXMicro: генерация сэмплов по параметрам ----------
