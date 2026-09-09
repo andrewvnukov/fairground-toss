@@ -95,15 +95,17 @@ await page.evaluate(() => window.__toggleLang());
 let afterLang = await state();
 assert(afterLang.lang !== beforeLang.lang, 'language toggle switches lang');
 
-// UI: модалки открываются и закрываются
-await page.click('#shopBtn');
-assert(await page.isVisible('#modal:not(.hidden)'), 'shop modal opens');
+// UI: модалки открываются и закрываются (магазин+полка объединены в одну модалку "призы" с вкладками)
+await page.click('#prizeBtn');
+assert(await page.isVisible('#modal:not(.hidden)'), 'prizes modal opens on the buy tab');
+assert(await page.isVisible('.row'), 'buy tab shows the buyable prize list');
+await page.click('#prizeTabShelf');
+assert(await page.isVisible('.coll'), 'shelf tab shows the collection grid');
+await page.click('#prizeTabBuy');
+assert(await page.isVisible('.row'), 'switching back to the buy tab shows the list again');
 await page.click('#mClose');
 await page.click('#upBtn');
 assert(await page.isVisible('#modal:not(.hidden)'), 'upgrades modal opens');
-await page.click('#mClose');
-await page.click('#shelfBtn');
-assert(await page.isVisible('#modal:not(.hidden)'), 'prize shelf modal opens');
 await page.click('#mClose');
 
 // сейв переживает перезагрузку

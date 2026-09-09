@@ -38,8 +38,8 @@ const CONFIG = {
   shots: [
     ['d1-gameplay', async () => {}],
     ['d2-cascade',  async p => { await p.evaluate(() => window.__forceHitBottomCenter()); await p.waitForTimeout(150); }],
-    ['d3-shelf',    async p => { await p.evaluate(() => { window.__grant(1000000); for (let i=0;i<9;i++) window.__buyNextPrize(); }); await p.click('#shelfBtn'); }],
-    ['d4-shop',     async p => { await p.evaluate(() => window.__grant(50000)); await p.click('#shopBtn'); }],
+    ['d3-shelf',    async p => { await p.evaluate(() => { window.__grant(1000000); for (let i=0;i<9;i++) window.__buyNextPrize(); }); await p.click('#prizeBtn'); await p.click('#prizeTabShelf'); }],
+    ['d4-shop',     async p => { await p.evaluate(() => window.__grant(50000)); await p.click('#prizeBtn'); }],
     ['d5-upgrades', async p => { await p.evaluate(() => window.__grant(50000)); await p.click('#upBtn'); }],
   ],
 };
