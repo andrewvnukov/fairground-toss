@@ -9,9 +9,14 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const url = 'file://' + resolve(__dirname, '..', 'index.html');
 
 const errors = [];
-const browser = await chromium.launch();
+// Путь к бинарю Chromium можно задать через PW_CHROMIUM (окружение CI без
+// скачанных браузеров Playwright); по умолчанию — обычный браузер Playwright.
+const browser = await chromium.launch(process.env.PW_CHROMIUM ? { executablePath: process.env.PW_CHROMIUM } : {});
 const page = await browser.newPage();
-page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
+// Сетевые сбои загрузки внешних ресурсов (шрифты, SDK Яндекса) — это не
+// JS-ошибки игры: в офлайн-окружении они всегда есть и ничего не значат.
+const isNetworkNoise = t => /Failed to load resource|ERR_(CONNECTION|NAME|INTERNET|NETWORK)/i.test(t);
+page.on('console', m => { if (m.type() === 'error' && !isNetworkNoise(m.text())) errors.push(m.text()); });
 page.on('pageerror', e => errors.push(String(e)));
 
 await page.goto(url);
@@ -108,15 +113,150 @@ await page.click('#upBtn');
 assert(await page.isVisible('#modal:not(.hidden)'), 'upgrades modal opens');
 await page.click('#mClose');
 
-// сейв переживает перезагрузку
-let beforeReload = await state();
+// сейв переживает перезагрузку. Не строгое равенство: призы на полке приносят
+// жетоны в каждом кадре, поэтому между записью и снимком после reload жетонов
+// становится больше, а не меньше.
+let beforeReload = JSON.parse(await page.evaluate(() => { persist(true); return window.render_game_to_text(); }));
 await page.reload();
 await page.waitForFunction(() => typeof window.render_game_to_text === 'function', { timeout: 8000 });
 let afterReload = await state();
-assert(afterReload.coins === beforeReload.coins, 'save persists across reload (coins)');
+assert(afterReload.coins >= beforeReload.coins, 'save persists across reload (coins)');
 assert(afterReload.prizes === beforeReload.prizes, 'save persists across reload (prizes)');
 
 assert(errors.length === 0, 'no console/page errors' + (errors.length ? ' -> ' + errors.join(' | ') : ''));
+
+// ──────────────────────────────────────────────────────────────
+//  Маршрут, офлайн, ежедневка, подсказки, подарки — проверки по
+//  playermotivation.md §8 и idle-monetization.md §10
+// ──────────────────────────────────────────────────────────────
+
+// новый игрок видит первое место, ни один пункт чек-листа не закрыт сам собой
+await page.evaluate(() => window.__seedSave(null));
+await page.reload();
+await page.waitForFunction(() => typeof window.render_game_to_text === 'function', { timeout: 8000 });
+let fresh0 = await state();
+assert(fresh0.route === 0, 'new player starts at the first place');
+assert(fresh0.goals.every(g => g === false), 'no checklist item is pre-completed for a new player');
+assert(fresh0.ready === false, 'a new player cannot move on immediately');
+
+// дальний горизонт открывается в одно нажатие из шапки
+await page.evaluate(() => window.__closeModal());
+await page.click('#routeChip');
+assert(await page.isVisible('#modal:not(.hidden)'), 'route map opens in one tap from the HUD');
+const stopsShown = await page.evaluate(() => document.querySelectorAll('#mBody .stop').length);
+assert(stopsShown >= 5, 'the map shows the whole route (' + stopsShown + ')');
+assert((await page.evaluate(() => document.querySelectorAll('#mBody .stop.fog').length)) > 0,
+  'far places are still under fog');
+await page.click('#mClose');
+
+// подарки не двигают метрику прогресса, производство двигает
+let g0 = await state();
+await page.evaluate(() => window.__grant(1e6));
+let g1 = await state();
+assert(g1.coins > g0.coins && g1.lifetime === g0.lifetime, 'a gift does NOT move the lifetime-earned metric');
+await page.evaluate(() => window.__earn(1000));
+assert((await state()).lifetime > g1.lifetime, 'production DOES move the lifetime-earned metric');
+
+// одинаковые призы складываются в доход
+await page.evaluate(() => { window.__grant(1e9); window.__buyPrize('bear'); });
+let one = await state();
+await page.evaluate(() => window.__buyPrize('bear'));
+let two = await state();
+assert(two.shelf === one.shelf + 1, 'a prize can be taken more than once');
+assert(two.baseIps > one.baseIps, 'every prize on the shelf adds passive income');
+assert(two.prizes === one.prizes, 'a second copy does not count as a new prize');
+
+// высокая пирамида — твист места: банок становится больше
+const cansBefore = (await state()).cansTotal;
+await page.evaluate(() => {
+  for (let i = 0; i < 4; i++) { window.__forceGoals(); window.__route(); window.__closeModal(); }
+});
+const cansAfter = (await state()).cansTotal;
+assert(cansAfter > cansBefore, 'the taller-pyramid twist adds cans (' + cansBefore + ' -> ' + cansAfter + ')');
+
+// за последним местом игра продолжается
+await page.evaluate(() => {
+  for (let i = 0; i < 8; i++) { window.__forceGoals(); window.__route(); window.__closeModal(); }
+});
+let looped = await state();
+assert(looped.loop >= 1, 'the route continues past the finale into a second lap');
+assert(isFinite(looped.baseIps), 'income stays finite after the finale');
+
+// офлайн: короткая отлучка молчит, длинная показывает окно
+await page.evaluate(() => { window.__setLastSeen(Date.now() - 10 * 1000); window.__checkOffline(); });
+assert((await state()).modal !== 'offline', 'a 10-second absence does not open the return window');
+await page.evaluate(() => { window.__setLastSeen(Date.now() - 6 * 3600 * 1000); });
+const rep = await page.evaluate(() => window.__checkOffline());
+assert(rep && rep.gained > 0, 'a 6-hour absence pays offline income');
+assert((await state()).modal === 'offline', 'a long absence opens the return window');
+await page.evaluate(() => window.__closeModal());
+
+// доход за потолок ПРОПОРЦИОНАЛЕН времени (ловит скрытую обрезку в досчёте)
+const prop = await page.evaluate(() => {
+  const a = window.snapshot().coins; window.simulateFor(3600);
+  const b = window.snapshot().coins; window.simulateFor(7200);
+  return { h1: b - a, h2: window.snapshot().coins - b };
+});
+assert(prop.h1 > 0 && Math.abs(prop.h2 / prop.h1 - 2) < 0.05,
+  'offline catch-up is proportional to time (' + (prop.h2 / prop.h1).toFixed(3) + ')');
+
+// офлайн НЕ засчитывается в цели чек-листа
+const throwsBefore = (await state()).throws;
+await page.evaluate(() => window.simulateFor(6 * 3600));
+assert((await state()).throws === throwsBefore,
+  'the offline barker does not count towards the checklist');
+
+// ежедневная серия: в один день награда одна
+const firstDaily = await page.evaluate(() => window.__checkDaily());
+if (firstDaily) await page.evaluate(() => window.__claimDaily());
+assert((await page.evaluate(() => window.__checkDaily())) === false,
+  'the daily bonus can only be claimed once per day');
+await page.evaluate(() => window.__closeModal());
+
+// реклама не стартует сама и не лезет сразу после запуска
+assert((await page.evaluate(() => window.__adAllowed())) === false,
+  'no interstitial during the warm-up right after boot');
+
+// подсказки: не поверх открытого окна, один раз навсегда
+await page.evaluate(() => window.__openModal('prizes'));
+assert((await page.evaluate(() => window.__tipTick())) === null, 'no tip on top of an open sheet');
+await page.evaluate(() => window.__closeModal());
+const tipId = await page.evaluate(() => { window.__hintDone(); return window.__tipTick(); });
+assert(tipId !== null, 'a tip appears once its condition holds');
+await page.evaluate(() => document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })));
+assert((await state()).tips >= 1, 'a dismissed tip is recorded in the save');
+
+// старый сейв без полей маршрута стартует на правдоподобном месте
+// и НЕ получает наград за прошлое
+await page.evaluate(() => window.__seedSave(JSON.stringify({
+  v: 1, coins: 5000, prizes: ['bear', 'elephant', 'giraffe'],
+  upAim: 3, upLights: 2, upHost: 1, bestCascade: 4,
+})));
+await page.reload();
+await page.waitForFunction(() => typeof window.render_game_to_text === 'function', { timeout: 8000 });
+let legacy = await state();
+assert(legacy.route >= 0 && legacy.route < 6, 'a legacy save lands on a valid place');
+assert(legacy.seeds === 0 && legacy.seedsUsed === 0, 'a legacy save gets no golden tokens for the past');
+assert(legacy.shelf === 3, 'a legacy shelf migrates without losing income');
+
+// повреждённый сейв не заклинивает запуск
+await page.evaluate(() => window.__seedSave('{not json at all'));
+await page.reload();
+await page.waitForFunction(() => typeof window.render_game_to_text === 'function', { timeout: 8000 });
+assert(typeof (await state()).coins === 'number', 'a corrupted save still boots the game');
+
+// сейв из будущей версии: неизвестный id — это «ничего», а не самый дорогой приз
+await page.evaluate(() => window.__seedSave(JSON.stringify({
+  v: 99, coins: 10, prizes: ['bear', 'griffin'], route: 99, loop: 3,
+  shelf: { griffin: 5, elephant: 2 },
+})));
+await page.reload();
+await page.waitForFunction(() => typeof window.render_game_to_text === 'function', { timeout: 8000 });
+let future = await state();
+assert(future.route <= 5, 'an out-of-range place index is clamped on load');
+assert(future.shelf === 3, 'an unknown prize id on the shelf resolves to nothing');
+
+assert(errors.length === 0, 'no console/page errors at the end' + (errors.length ? ' -> ' + errors.join(' | ') : ''));
 
 await browser.close();
 console.log(process.exitCode ? '\nSMOKE FAILED' : '\nSMOKE PASSED');
